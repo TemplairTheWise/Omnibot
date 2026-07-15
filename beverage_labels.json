@@ -1,0 +1,16 @@
+{
+  "nms_scores_th": 0.2,
+  "nms_iou_th": 0.45,
+  "classes": 9,
+  "labels": [
+    "bottle-glass",
+    "bottle-plastic",
+    "cup-disposable",
+    "cup-handle",
+    "glass-mug",
+    "glass-normal",
+    "glass-wine",
+    "gym bottle",
+    "tin can"
+  ]
+}
