@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 9
+names: ['bottle-glass', 'bottle-plastic', 'cup-disposable', 'cup-handle', 'glass-mug', 'glass-normal', 'glass-wine', 'gym bottle', 'tin can']
+
+roboflow:
+  workspace: roboflow-universe-projects
+  project: beverage-containers-3atxb
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/roboflow-universe-projects/beverage-containers-3atxb/dataset/3

@@ -10,6 +10,8 @@ dist/
 venv_hailo_rpi_examples/
 venv_hailo_rpi5_examples/
 .venv/
+**/hailo_dfc_env/
+**/*_env/site-packages/
 
 # Hailo downloaded resources (large binaries fetched by install.sh)
 resources/*.so
