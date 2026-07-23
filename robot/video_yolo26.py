@@ -15,7 +15,8 @@ from hailo_platform import (
     HailoStreamInterface
 )
 
-HEF_PATH = "yolo26_split.hef"
+from pathlib import Path
+HEF_PATH = Path(__file__).parent / "models" / "yolo26_split.hef"
 
 def read_exact(pipe, size):
     buf = bytearray(size)

@@ -63,10 +63,11 @@ PROJECT_ROOT=$(pwd)
 
 # Prepend the project root to the PYTHONPATH.
 # This ensures our project's modules are found first.
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/robot:${PYTHONPATH}"
 
 echo "Project directory added to PYTHONPATH for this session:"
 echo "${PROJECT_ROOT}"
+echo "${PROJECT_ROOT}/robot"
 
 # Activate the virtual environment
 if [ -d "$VENV_NAME" ]; then

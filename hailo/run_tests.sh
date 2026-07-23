@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# Path to your setup_env.sh file
-SETUP_ENV_PATH="setup_env.sh"
+# setup_env.sh lives one level up (project root)
+SETUP_ENV_PATH="$(dirname "${BASH_SOURCE[0]}")/../setup_env.sh"
 
 # Path to your tests directory
-TESTS_DIR="tests"
+TESTS_DIR="$(dirname "${BASH_SOURCE[0]}")/tests"
 
 # Source the setup_env.sh file (it will handle virtual environment activation)
 echo "Sourcing setup_env.sh..."

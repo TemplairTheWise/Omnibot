@@ -12,9 +12,10 @@ from hailo_platform import (
     HailoStreamInterface
 )
 
-IMAGE_PATH = "bottles.jpg"
-HEF_PATH = "yolo26_split.hef"
-OUTPUT_IMAGE = "output_detection.jpg"
+from pathlib import Path
+IMAGE_PATH   = Path(__file__).parent / "assets" / "bottles.jpg"
+HEF_PATH     = Path(__file__).parent / "models" / "yolo26_split.hef"
+OUTPUT_IMAGE = Path(__file__).parent / "assets" / "output_detection.jpg"
 
 print(f"Loading split YOLO 26 HEF from {HEF_PATH}...")
 try:

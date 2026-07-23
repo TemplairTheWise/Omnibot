@@ -9,6 +9,11 @@ class OmniBot:
     Class for interfacing with omni wheeled robot
     """
 
+    # Per-motor trim: the speedPercent command that brings each servo to true
+    # standstill. Determined empirically via force_test.py.
+    # [FL, FR, RL, RR] → [0, 1, 2, 3]
+    _TRIM = (8, -8, 12, -8)
+
     def __init__(self):
         self.i2c = busio.I2C(SCL, SDA)
         self.pca = PCA9685(self.i2c)
@@ -31,7 +36,10 @@ class OmniBot:
         Returns:
             None
         """
-        speed = (speedPercent / 100) * 90
+        # Shift the command by this motor's trim so that 0 % → true standstill
+        # and reduced speeds are proportional across all four servos.
+        trimmed = max(-100.0, min(100.0, speedPercent + self._TRIM[index]))
+        speed = (trimmed / 100) * 90
 
         # Flip speed for mirrored motors
         if index % 2 == 0:
@@ -103,8 +111,5 @@ class OmniBot:
         Returns:
             None
         """
-        # Set speed of every motor to 0
-        self.__setMotor(0, 8)
-        self.__setMotor(2,12)
-        self.__setMotor(1,-8)
-        self.__setMotor(3,-8)
+        for i in range(4):
+            self.__setMotor(i, 0)

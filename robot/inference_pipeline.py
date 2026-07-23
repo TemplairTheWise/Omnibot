@@ -56,15 +56,23 @@ COCO_LABELS = [
 Detection = namedtuple("Detection", ["label", "confidence", "x1", "y1", "x2", "y2"])
 # x1/y1/x2/y2 are normalised to [0, 1] relative to frame width/height.
 
+# ── Beverage labels (matches yolo26_split.hef and beverage_labels.json) ──────
+BEVERAGE_LABELS = [
+    "bottle-glass", "bottle-plastic", "cup-disposable",
+    "cup-handle", "glass-mug", "glass-normal",
+    "glass-wine", "gym bottle", "tin can",
+]
+
 # ── Tunables ──────────────────────────────────────────────────────────────────
 CAMERA_WIDTH    = 640
 CAMERA_HEIGHT   = 640
 CAMERA_FPS      = 12
 DET_EVERY       = 3     # run detection every N depth frames
-DET_CONF_THRESH = 0.40
+DET_CONF_THRESH = 0.25  # pre-NMS confidence threshold
+NMS_IOU_THRESH  = 0.40  # IoU threshold for NMS suppression
 
 # ── HEF paths ─────────────────────────────────────────────────────────────────
-_MODELS = Path(__file__).parent / "resources" / "models"
+_MODELS = Path(__file__).parent.parent / "hailo" / "resources" / "models"
 
 
 def _find_hef(filename: str) -> Path:
@@ -76,16 +84,19 @@ def _find_hef(filename: str) -> Path:
 
 
 def _find_det_hef() -> Path:
-    # yolov8s for hailo8l, yolov8m for hailo8; yolov6n as fallback
+    # Prefer the custom beverage model in the project root (same as custom_yolo26.py).
+    # Fall back to general-purpose models if it's missing.
+    custom = Path(__file__).parent / "models" / "yolo26_split.hef"
+    if custom.exists():
+        return custom
     for name, arch in [
         ("yolov8s.hef", "hailo8l"),
         ("yolov8m.hef", "hailo8"),
-        ("yolov6n.hef", "hailo8l"),
     ]:
         p = _MODELS / arch / name
         if p.exists():
             return p
-    raise FileNotFoundError("No detection HEF found in resources/models/")
+    raise FileNotFoundError("No detection HEF found.")
 
 
 DEPTH_HEF_PATH = _find_hef("scdepthv3.hef")
@@ -191,47 +202,73 @@ def _parse_depth(tensors: dict) -> np.ndarray:
     return d
 
 
-def _parse_detections(tensors: dict, labels: list[str]) -> list[Detection]:
+def _parse_detections(
+    tensors: dict, labels: list[str], input_w: int, input_h: int
+) -> list[Detection]:
     """
-    Parse yolov8s Hailo NMS output into Detection namedtuples.
+    Parse the custom yolo26_split model output into Detection namedtuples.
 
-    HailoRT returns the NMS result as a nested Python list (not a rectangular
-    ndarray) because each class may have a different number of detections:
+    The model outputs two raw tensors — no built-in NMS:
+      • boxes tensor:  (8400, 4)  — cx, cy, w, h in absolute pixels (or normalised)
+      • logits tensor: (8400, N)  — raw class scores (one column per label)
 
-        tensors[key]                    # outer list, length = batch size
-        tensors[key][0]                 # batch 0, length = num_classes (80)
-        tensors[key][0][class_id]       # list of detections for that class
-        tensors[key][0][class_id][i]    # one detection: [x1, y1, x2, y2, score]
-
-    Coordinates are normalised to [0, 1] relative to the model input size.
+    We apply argmax + confidence filtering + cv2 NMS, then normalise
+    the surviving boxes to [0, 1] so downstream code is coordinate-agnostic.
     """
-    if not tensors:
+    if len(tensors) < 2:
+        log.warning("Expected 2 output tensors from custom model, got %d.", len(tensors))
         return []
 
-    nms_key = next(
-        (k for k in tensors if "nms" in k.lower()),
-        next(iter(tensors)),
-    )
-    raw = tensors[nms_key]
+    values = list(tensors.values())
+    out1 = np.squeeze(values[0]).astype(np.float32)
+    out2 = np.squeeze(values[1]).astype(np.float32)
 
-    # Unwrap batch dimension
-    try:
-        batch_0 = raw[0]
-    except (IndexError, TypeError):
-        log.warning("Could not unwrap batch from detection output; skipping.")
+    # Ensure (8400, C) orientation — transpose if channels are on axis 0
+    if out1.ndim == 2 and out1.shape[0] < out1.shape[1]:
+        out1 = out1.T
+    if out2.ndim == 2 and out2.shape[0] < out2.shape[1]:
+        out2 = out2.T
+
+    # Assign: whichever has 4 columns is boxes, the other is class logits
+    if out1.shape[1] == 4:
+        boxes, logits = out1, out2
+    else:
+        boxes, logits = out2, out1
+
+    # Vectorised: best class and its score for every anchor
+    class_ids = np.argmax(logits, axis=1)
+    confs      = logits[np.arange(len(logits)), class_ids]
+
+    # Pre-NMS filter
+    keep = confs >= DET_CONF_THRESH
+    if not np.any(keep):
+        return []
+
+    boxes_f    = boxes[keep]
+    confs_f    = confs[keep]
+    class_ids_f = class_ids[keep]
+
+    # cx,cy,w,h → x,y,w,h  (scale up if coordinates are normalised [0,1])
+    cx, cy, bw, bh = boxes_f[:, 0], boxes_f[:, 1], boxes_f[:, 2], boxes_f[:, 3]
+    if np.median(bw) < 2.0:          # normalised — scale to pixels
+        cx, cy, bw, bh = cx * input_w, cy * input_h, bw * input_w, bh * input_h
+    xywh = np.stack([cx - bw / 2, cy - bh / 2, bw, bh], axis=1).astype(int).tolist()
+
+    # NMS
+    indices = cv2.dnn.NMSBoxes(xywh, confs_f.tolist(), DET_CONF_THRESH, NMS_IOU_THRESH)
+    if not len(indices):
         return []
 
     detections: list[Detection] = []
-    num_classes = min(len(batch_0), len(labels))
-
-    for class_id in range(num_classes):
-        for det in batch_0[class_id]:
-            # det = [x1, y1, x2, y2, score]
-            x1, y1, x2, y2, score = (float(v) for v in det)
-            if score >= DET_CONF_THRESH:
-                detections.append(
-                    Detection(labels[class_id], score, x1, y1, x2, y2)
-                )
+    for i in indices.flatten():
+        x, y, w_px, h_px = xywh[i]
+        x1 = max(0.0, x / input_w)
+        y1 = max(0.0, y / input_h)
+        x2 = min(1.0, (x + w_px) / input_w)
+        y2 = min(1.0, (y + h_px) / input_h)
+        cid = int(class_ids_f[i])
+        label = labels[cid] if cid < len(labels) else "unknown"
+        detections.append(Detection(label, float(confs_f[i]), x1, y1, x2, y2))
     return detections
 
 
@@ -296,42 +333,66 @@ class _InferenceWorker(threading.Thread):
 
             with InferVStreams(depth_group, depth_in_params, depth_out_params) as depth_pipe:
                 with InferVStreams(det_group, det_in_params, det_out_params) as det_pipe:
-                    frame_count = 0
+                    frame_count  = 0
+                    active_name  = None  # "depth" | "det" | None
+                    active_ctx   = None  # entered ActivatedNetworkContextManager
                     log.info("Inference worker ready — depth @ %s, det @ %s",
                              f"{depth_h}×{depth_w}", f"{det_h}×{det_w}")
 
-                    while self.state.running:
-                        frame = self.state.get_frame()
-                        if frame is None:
-                            time.sleep(0.01)
-                            continue
+                    def _switch_to(group, group_params, name):
+                        # Both HEFs share one VDevice, so only one group may be
+                        # active at a time. Re-entering activate() on every
+                        # frame — even when the group hasn't changed — thrashes
+                        # the device and races HailoRT's async activation,
+                        # producing HAILO_STREAM_NOT_ACTIVATED read failures.
+                        # Only switch (and wait for activation to land) when
+                        # the required group actually changes.
+                        nonlocal active_name, active_ctx
+                        if active_name == name:
+                            return
+                        if active_ctx is not None:
+                            active_ctx.__exit__(None, None, None)
+                        active_ctx = group.activate(group_params)
+                        active_ctx.__enter__()
+                        group.wait_for_activation()
+                        active_name = name
 
-                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    try:
+                        while self.state.running:
+                            frame = self.state.get_frame()
+                            if frame is None:
+                                time.sleep(0.01)
+                                continue
 
-                        # ── Depth (every frame) ───────────────────────────
-                        depth_input = cv2.resize(rgb, (depth_w, depth_h))
-                        depth_batch = np.expand_dims(depth_input, axis=0)  # (1, H, W, 3)
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                        with depth_group.activate(depth_group_params):
+                            # ── Depth (every frame) ───────────────────────
+                            depth_input = cv2.resize(rgb, (depth_w, depth_h))
+                            depth_batch = np.expand_dims(depth_input, axis=0)  # (1, H, W, 3)
+
+                            _switch_to(depth_group, depth_group_params, "depth")
                             depth_out = depth_pipe.infer(
                                 {depth_in_info.name: depth_batch}
                             )
-                        self.state.put_depth(_parse_depth(depth_out))
+                            self.state.put_depth(_parse_depth(depth_out))
 
-                        # ── Detection (every DET_EVERY frames) ───────────
-                        if frame_count % DET_EVERY == 0:
-                            det_input = cv2.resize(rgb, (det_w, det_h))
-                            det_batch = np.expand_dims(det_input, axis=0)
+                            # ── Detection (every DET_EVERY frames) ────────
+                            if frame_count % DET_EVERY == 0:
+                                det_input = cv2.resize(rgb, (det_w, det_h))
+                                det_batch = np.expand_dims(det_input, axis=0)
 
-                            with det_group.activate(det_group_params):
+                                _switch_to(det_group, det_group_params, "det")
                                 det_out = det_pipe.infer(
                                     {det_in_info.name: det_batch}
                                 )
-                            self.state.put_detections(
-                                _parse_detections(det_out, self.labels)
-                            )
+                                self.state.put_detections(
+                                    _parse_detections(det_out, self.labels, det_w, det_h)
+                                )
 
-                        frame_count += 1
+                            frame_count += 1
+                    finally:
+                        if active_ctx is not None:
+                            active_ctx.__exit__(None, None, None)
 
         log.info("InferenceWorker stopped.")
 
@@ -345,10 +406,13 @@ class InferencePipeline:
     any thread at any time (returns None values until the first frames arrive).
     """
 
-    def __init__(self, labels: list[str] = COCO_LABELS):
+    def __init__(self, labels: list[str] = BEVERAGE_LABELS):
         self.state   = SharedState()
         self._camera = _CameraReader(self.state)
         self._worker = _InferenceWorker(self.state, labels)
+        self._rec_thread: threading.Thread | None = None
+        self._rec_running = False
+        self._rec_flip    = False
 
     def start(self) -> None:
         log.info("Starting InferencePipeline …")
@@ -358,6 +422,7 @@ class InferencePipeline:
 
     def stop(self) -> None:
         log.info("Stopping InferencePipeline …")
+        self.stop_recording()
         self.state.running = False
         self._camera.join(timeout=5)
         self._worker.join(timeout=5)
@@ -365,6 +430,132 @@ class InferencePipeline:
     def get_state(self) -> tuple[np.ndarray | None, np.ndarray | None, list[Detection]]:
         """Return (bgr_frame, depth_map, detections). All None until first frame."""
         return self.state.snapshot()
+
+    # ── Video recording ───────────────────────────────────────────────────────
+
+    def start_recording(self, path: str = "debug_approach.mp4",
+                        flip: bool = False) -> None:
+        """
+        Begin saving annotated frames (detection boxes + labels) to a video file.
+        Call stop_recording() or stop() to flush and close.
+
+        Parameters
+        ----------
+        path : output .mp4 path
+        flip : rotate the saved frames 180° for viewing when the camera is
+               mounted upside-down.  Does not affect inference — bearing
+               calculation always uses the original orientation.
+        """
+        if self._rec_running:
+            log.warning("Already recording — stop first.")
+            return
+        self._rec_flip = flip
+        self._rec_running = True
+        self._rec_thread = threading.Thread(
+            target=self._record_loop, args=(path,),
+            name="VideoRecorder", daemon=True,
+        )
+        self._rec_thread.start()
+        log.info("Recording started → %s  flip=%s", path, flip)
+
+    def stop_recording(self) -> None:
+        """Flush and close the video file."""
+        if not self._rec_running:
+            return
+        self._rec_running = False
+        if self._rec_thread:
+            self._rec_thread.join(timeout=5.0)
+        log.info("Recording stopped.")
+
+    def _record_loop(self, path: str) -> None:
+        writer = None
+        prev_frame_id = None
+        try:
+            while self._rec_running:
+                frame, _, dets = self.get_state()
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
+
+                # Skip if frame hasn't changed since last write
+                frame_id = id(frame)
+                if frame_id == prev_frame_id:
+                    time.sleep(1.0 / CAMERA_FPS)
+                    continue
+                prev_frame_id = frame_id
+
+                if writer is None:
+                    h, w = frame.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(path, fourcc, CAMERA_FPS, (w, h))
+                    log.info("VideoWriter opened: %dx%d @ %d fps", w, h, CAMERA_FPS)
+
+                vis = frame.copy()
+                h, w = vis.shape[:2]
+
+                for d in dets:
+                    x1 = int(d.x1 * w);  y1 = int(d.y1 * h)
+                    x2 = int(d.x2 * w);  y2 = int(d.y2 * h)
+                    cx = (x1 + x2) // 2
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    label = f"{d.label} {d.confidence:.0%}"
+                    cv2.putText(vis, label, (x1, max(y1 - 6, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1,
+                                cv2.LINE_AA)
+                    # Bearing line from bottom-centre to detection centroid
+                    cv2.line(vis, (w // 2, h), (cx, (y1 + y2) // 2),
+                             (0, 200, 255), 1)
+
+                # Frame centre crosshair
+                cv2.line(vis, (w//2 - 15, h//2), (w//2 + 15, h//2), (255,255,255), 1)
+                cv2.line(vis, (w//2, h//2 - 15), (w//2, h//2 + 15), (255,255,255), 1)
+
+                if self._rec_flip:
+                    vis = cv2.rotate(vis, cv2.ROTATE_180)
+
+                writer.write(vis)
+                time.sleep(1.0 / CAMERA_FPS)
+
+        except Exception:
+            log.exception("VideoRecorder error")
+        finally:
+            if writer:
+                writer.release()
+
+
+# ── Goal-bearing helper ───────────────────────────────────────────────────────
+
+def goal_bearing_from_detections(
+    detections: list[Detection],
+    target_label: str | None = None,
+    camera_fov_deg: float = 62.0,
+) -> float | None:
+    """
+    Compute the horizontal bearing to the best matching detection.
+
+    Parameters
+    ----------
+    detections     : list from InferencePipeline.get_state()
+    target_label   : if given, only detections with this label are considered;
+                     if None, any detection is eligible
+    camera_fov_deg : horizontal field of view of the camera
+
+    Returns
+    -------
+    float  — bearing in degrees (+ = right, − = left, 0 = straight ahead)
+    None   — no matching detection in the current frame
+
+    Selection strategy: the candidate with the largest bounding-box area is
+    chosen (largest box = closest to camera = highest priority target).
+    """
+    candidates = [d for d in detections
+                  if target_label is None or d.label == target_label]
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1))
+    cx = (best.x1 + best.x2) / 2.0          # normalised [0, 1]
+    return (cx - 0.5) * camera_fov_deg       # degrees; + = right of centre
 
 
 # ── Smoke-test entry point ────────────────────────────────────────────────────
