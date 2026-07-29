@@ -101,6 +101,45 @@ def test_run_drives_for_the_given_duration_then_stops():
     assert any(c[0] in ("startMove", "rotate") for c in bot.calls[:-1])
 
 
+def test_run_verbose_mode_prints_status_without_crashing(capsys):
+    class FakePipeline:
+        def get_state(self):
+            return None, _open_depth(), []
+
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar(zone=ZONE_SLOW, distance_cm=30.0))
+    nav.run(FakePipeline(), goal_bearing_deg=0.0, duration_s=0.05, verbose=True)
+    out = capsys.readouterr().out
+    assert "Frame" in out
+
+
+def test_run_skips_iteration_while_depth_is_not_yet_available():
+    class FakePipeline:
+        def __init__(self):
+            self.calls = 0
+
+        def get_state(self):
+            self.calls += 1
+            depth = None if self.calls == 1 else _open_depth()
+            return None, depth, []
+
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar())
+    nav.run(FakePipeline(), goal_bearing_deg=0.0, duration_s=0.15, verbose=False)
+    assert bot.calls[-1] == ("stop",)
+
+
+def test_run_stops_cleanly_on_keyboard_interrupt():
+    class FakePipeline:
+        def get_state(self):
+            raise KeyboardInterrupt
+
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar())
+    nav.run(FakePipeline(), goal_bearing_deg=0.0, duration_s=1.0, verbose=False)
+    assert bot.calls == [("stop",)]  # cleaned up via the finally block
+
+
 def test_speed_scales_with_clearance_between_min_and_base():
     bot = FakeBot()
     nav = Navigator(bot, sonar=FakeSonar())
