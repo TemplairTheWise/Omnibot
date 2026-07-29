@@ -107,3 +107,21 @@ def test_face_heading_skips_rotation_when_already_close():
     scanner = _fast_scanner(bot, FakePipeline(), n_steps=4)
     scanner.face_heading(1.0)  # within the 2 deg "close enough" threshold
     assert not any(c[0] == "rotate" for c in bot.calls)
+
+
+def test_ascii_polar_visualiser_marks_target_and_best_heading():
+    from polar_scan import _ascii_polar, ScanResult
+
+    result = ScanResult(
+        clearance_map=np.array([0.9, 0.2, 0.9, 0.9], dtype=np.float32),
+        target_heading_deg=90.0,
+        best_heading_deg=0.0,
+        target_label="bottle-plastic",
+        n_steps=4,
+        step_angle_deg=90.0,
+        completed=True,
+    )
+    text = _ascii_polar(result)
+    assert "TARGET" in text
+    assert "BEST" in text
+    assert "4 steps" in text

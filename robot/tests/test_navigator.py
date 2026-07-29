@@ -89,6 +89,18 @@ def test_speed_capped_in_slow_sonar_zone():
     assert speed <= SLOW_ZONE_CAP
 
 
+def test_run_drives_for_the_given_duration_then_stops():
+    class FakePipeline:
+        def get_state(self):
+            return None, _open_depth(), []
+
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar())
+    nav.run(FakePipeline(), goal_bearing_deg=0.0, duration_s=0.05, verbose=False)
+    assert bot.calls[-1] == ("stop",)
+    assert any(c[0] in ("startMove", "rotate") for c in bot.calls[:-1])
+
+
 def test_speed_scales_with_clearance_between_min_and_base():
     bot = FakeBot()
     nav = Navigator(bot, sonar=FakeSonar())
