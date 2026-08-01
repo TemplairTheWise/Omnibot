@@ -26,9 +26,11 @@ hailort*.log
 # Robot runtime outputs
 search_logs/
 eval_detection_results.json
-eval_navigation_results.csv
+eval_mapping_results.json
+eval_navigation_results.csv*
 dataset/
 dataset_harsh/
+attempts/
 
 # Secrets
 .env

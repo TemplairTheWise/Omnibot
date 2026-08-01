@@ -76,6 +76,12 @@ APPROACH_SLOW_SPEED     = 35
 APPROACH_ROTATE_BEARING = 8.0
 FOUND_BOX_AREA          = 0.25
 
+# Target must be detected for more than this many *consecutive* frames
+# before the arrival check (sonar / box area) is even evaluated - guards
+# against a single-frame false positive (e.g. right after the robot
+# happens to be close to a wall) instantly triggering FOUND.
+FOUND_CONFIRM_FRAMES = 10
+
 # Re-scan: if no detection for this many seconds while SEARCHING, stop and
 # run a new polar scan.  Prevents the robot from wandering indefinitely.
 RESCAN_AFTER_S = 20.0
@@ -214,6 +220,8 @@ class NavStateMachine:
                     "target":           data.get("target"),
                     "start_time":       data.get("start_time"),
                     "duration_s":       data.get("duration_s"),
+                    "nav_duration_s":   data.get("nav_duration_s"),
+                    "scan_s":           data.get("scan_s"),
                     "outcome":          data.get("outcome"),
                     "detections_count": data.get("detections_count", 0),
                 })
@@ -231,23 +239,51 @@ class NavStateMachine:
         entry.update(kw)
         self._session["events"].append(entry)
 
+    def _scanning_duration_s(self, total_duration: float) -> float:
+        """
+        Sum of wall-clock time spent in the SCANNING state, from the logged
+        state-change events - covers the initial polar scan and any inline
+        re-scans triggered by RESCAN_AFTER_S.  Lets callers report a
+        navigation-only duration that isn't inflated by scan time.
+        """
+        scan_total = 0.0
+        scan_start: float | None = None
+        for e in self._session["events"]:
+            if e["type"] != "state":
+                continue
+            if e["state"] == SCANNING:
+                scan_start = e["t"]
+            elif scan_start is not None:
+                scan_total += e["t"] - scan_start
+                scan_start = None
+        if scan_start is not None:
+            # Session ended while still scanning (e.g. stopped mid-scan).
+            scan_total += total_duration - scan_start
+        return round(scan_total, 1)
+
     def _finalize_session(self, outcome: str) -> None:
         """Write the session JSON to disk.  Called from the run thread's finally block."""
         if self._session is None:
             return
         self._session["end_time"]   = datetime.now(timezone.utc).isoformat()
-        self._session["duration_s"] = round(time.monotonic() - self._session_start_t, 1)
+        total_duration = round(time.monotonic() - self._session_start_t, 1)
+        self._session["duration_s"] = total_duration
         self._session["outcome"]    = outcome
         self._session["detections_count"] = sum(
             1 for e in self._session["events"] if e["type"] == "detection"
         )
+        scan_s = self._scanning_duration_s(total_duration)
+        self._session["scan_s"]         = scan_s
+        self._session["nav_duration_s"] = round(total_duration - scan_s, 1)
         LOG_DIR.mkdir(exist_ok=True)
         path = LOG_DIR / f"{self._session['session_id']}.json"
         try:
             path.write_text(json.dumps(self._session, indent=2))
-            log.info("Session log → %s  outcome=%s  dur=%.1fs  det=%d",
+            log.info("Session log → %s  outcome=%s  dur=%.1fs (nav %.1fs, scan %.1fs)  det=%d",
                      path.name, outcome,
                      self._session["duration_s"],
+                     self._session["nav_duration_s"],
+                     self._session["scan_s"],
                      self._session["detections_count"])
         except OSError as exc:
             log.warning("Could not write session log: %s", exc)
@@ -347,6 +383,7 @@ class NavStateMachine:
         """
         interval              = 1.0 / SEARCH_LOOP_HZ
         lost_frames           = 0
+        found_confirm_count   = 0    # consecutive frames the target has been seen in APPROACHING
         last_approach_bearing: float | None = None
         last_search_det_t     = time.monotonic()  # time of last detection in SEARCHING
 
@@ -396,6 +433,7 @@ class NavStateMachine:
                         self._set_state(APPROACHING)
                     last_approach_bearing = bearing
                     lost_frames = 0
+                    found_confirm_count = 0
                     last_search_det_t = time.monotonic()
                     just_entered_approaching = True
                 else:
@@ -407,30 +445,37 @@ class NavStateMachine:
                             last_approach_bearing = None  # no live bearing yet
                             just_entered_approaching = True
                             lost_frames = 0
+                            found_confirm_count = 0
 
             elif state == APPROACHING:
                 if bearing is not None:
                     last_approach_bearing = bearing
                     lost_frames = 0
+                    found_confirm_count += 1
 
                     # ── Arrival check ─────────────────────────────────────────
+                    # Only trust sonar/box-area once the target has held for
+                    # several consecutive frames - a single-frame false
+                    # positive (e.g. the instant the robot happens to be
+                    # near a wall) must not be enough to declare FOUND.
                     arrived = False
-                    if self.sonar is not None:
-                        dist = self.sonar.distance_cm
-                        if dist is not None and dist <= APPROACH_STOP_CM:
-                            arrived = True
-
-                    if not arrived:
-                        candidates = [
-                            d for d in detections
-                            if self._target_label is None
-                            or d.label == self._target_label
-                        ]
-                        if candidates:
-                            best = max(candidates,
-                                       key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1))
-                            if (best.x2 - best.x1) * (best.y2 - best.y1) >= FOUND_BOX_AREA:
+                    if found_confirm_count > FOUND_CONFIRM_FRAMES:
+                        if self.sonar is not None:
+                            dist = self.sonar.distance_cm
+                            if dist is not None and dist <= APPROACH_STOP_CM:
                                 arrived = True
+
+                        if not arrived:
+                            candidates = [
+                                d for d in detections
+                                if self._target_label is None
+                                or d.label == self._target_label
+                            ]
+                            if candidates:
+                                best = max(candidates,
+                                           key=lambda d: (d.x2 - d.x1) * (d.y2 - d.y1))
+                                if (best.x2 - best.x1) * (best.y2 - best.y1) >= FOUND_BOX_AREA:
+                                    arrived = True
 
                     if arrived:
                         self.bot.stop()
@@ -441,6 +486,7 @@ class NavStateMachine:
 
                 else:
                     lost_frames += 1
+                    found_confirm_count = 0
                     if lost_frames >= TARGET_LOST_FRAMES:
                         log.info("Target lost for %d frames — back to SEARCHING",
                                  lost_frames)
