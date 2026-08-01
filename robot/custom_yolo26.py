@@ -19,7 +19,7 @@ OUTPUT_IMAGE = Path(__file__).parent / "assets" / "output_detection.jpg"
 
 print(f"Loading split YOLO 26 HEF from {HEF_PATH}...")
 try:
-    hef = HEF(HEF_PATH)
+    hef = HEF(str(HEF_PATH))
 except Exception as e:
     print(f"Error loading HEF: {e}")
     sys.exit(1)

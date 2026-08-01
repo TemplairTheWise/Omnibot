@@ -3,15 +3,19 @@ capture_dataset.py — Interactive YOLO dataset capture.
 
 Shows a live camera preview with detection bounding boxes overlaid.
 Press SPACE to save the current frame as a JPEG + matching YOLO .txt
-annotation. Press Q or ESC to quit.
+annotation. Press Q to quit (ESC is intentionally not bound - see the
+in-loop comment on this Pi's Wayland/XWayland phantom-ESC issue).
 
 Usage
 -----
-    python capture_dataset.py [--out DIR] [--flip] [--conf 0.25]
+    python capture_dataset.py [--out DIR] [--no-flip] [--conf 0.25]
 
-    --out   DIR     Output directory (default: dataset/)
-    --flip          Rotate preview 180° for viewing (saved images are NOT flipped
-                    — they match the coordinate space the model was trained in)
+    --out     DIR   Output directory (default: dataset/)
+    --flip          Rotate preview 180° for viewing (default: ON, since the
+                    camera is physically mounted rotated; saved images are
+                    NOT flipped — they match the coordinate space the model
+                    was trained in)
+    --no-flip       Disable the 180° preview rotation
     --conf  FLOAT   Minimum confidence to include a detection (default: 0.25)
 
 YOLO annotation format (one line per detection):
@@ -143,8 +147,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive YOLO dataset capture")
     parser.add_argument("--out",  type=Path, default=Path("dataset"),
                         help="Output directory (default: dataset/)")
-    parser.add_argument("--flip", action="store_true",
-                        help="Rotate preview 180° (does not affect saved images)")
+    parser.add_argument("--flip", dest="flip", action="store_true", default=True,
+                        help="Rotate preview 180° (default: on - the camera is "
+                             "physically mounted rotated; does not affect saved images)")
+    parser.add_argument("--no-flip", dest="flip", action="store_false",
+                        help="Disable the 180° preview rotation")
     parser.add_argument("--conf", type=float, default=DET_CONF_THRESH,
                         help=f"Min detection confidence (default {DET_CONF_THRESH})")
     args = parser.parse_args()
@@ -209,7 +216,12 @@ def main() -> None:
             cv2.imshow("capture_dataset", vis)
             key = cv2.waitKey(30) & 0xFF
 
-            if key in (ord('q'), ord('Q'), 27):  # Q or ESC
+            # NOTE: ESC (27) is deliberately NOT treated as quit here - on this
+            # Pi's Wayland/XWayland setup, a freshly mapped window that doesn't
+            # get real focus can synthesize a sustained phantom ESC, which would
+            # otherwise close the window before the user ever touches a key.
+            # Use 'q' or the window's close button instead.
+            if key in (ord('q'), ord('Q')):
                 break
 
             if key == ord(' '):
@@ -217,6 +229,9 @@ def main() -> None:
                 saved_count += 1
                 idx         += 1
                 flash        = _SAVED_FLASH_FRAMES
+
+            if cv2.getWindowProperty("capture_dataset", cv2.WND_PROP_VISIBLE) < 1:
+                break  # window closed via the OS close button
 
     except KeyboardInterrupt:
         pass

@@ -30,7 +30,7 @@ def read_exact(pipe, size):
 
 print(f"Loading split YOLO 26 HEF from {HEF_PATH}...")
 try:
-    hef = HEF(HEF_PATH)
+    hef = HEF(str(HEF_PATH))
 except Exception as e:
     print(f"Error loading HEF: {e}")
     sys.exit(1)
@@ -58,9 +58,10 @@ with VDevice() as target:
         process = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         
         frame_size = int(640 * 640 * 1.5)
-        
-        print("Starting live video stream. Press 'q' to quit.")
-        
+        WINDOW_NAME = 'Hailo YOLO 26 Live Inference'
+
+        print("Starting live video stream. Click the video window, then press 'q' to quit.")
+
         with network_group.activate(network_group_params):
             while True:
                 start_time = time.time()
@@ -143,10 +144,17 @@ with VDevice() as target:
                 cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 30), 
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                             
-                cv2.imshow('Hailo YOLO 26 Live Inference', display_frame)
-                
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                cv2.imshow(WINDOW_NAME, display_frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                # NOTE: ESC deliberately not treated as quit - on this Pi's
+                # Wayland/XWayland setup a freshly focused window can synthesize
+                # a sustained phantom ESC, which would close the window
+                # immediately. Use 'q' or the window's close button instead.
+                if key == ord('q'):
                     break
-                    
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    break  # window closed via the OS close button
+
         process.terminate()
         cv2.destroyAllWindows()
