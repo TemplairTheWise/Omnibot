@@ -1,0 +1,17 @@
+{
+  "ap50_class_agnostic": 0.8471,
+  "precision": 1.0,
+  "recall": 0.8471,
+  "f1": 0.9172,
+  "tp": 72,
+  "fp": 0,
+  "gt": 85,
+  "n_images": 84,
+  "n_skipped": 9,
+  "latency_mean_ms": 16.9,
+  "conf_thresh": 0.25,
+  "iou_thresh": 0.5,
+  "excluded_classes": [
+    "cup-disposable"
+  ]
+}

@@ -28,6 +28,7 @@ search_logs/
 eval_detection_results.json
 eval_navigation_results.csv
 dataset/
+dataset_harsh/
 
 # Secrets
 .env

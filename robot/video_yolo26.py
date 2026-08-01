@@ -147,7 +147,11 @@ with VDevice() as target:
                 cv2.imshow(WINDOW_NAME, display_frame)
 
                 key = cv2.waitKey(1) & 0xFF
-                if key in (ord('q'), 27):  # 'q' or ESC, pressed with the video window focused
+                # NOTE: ESC deliberately not treated as quit - on this Pi's
+                # Wayland/XWayland setup a freshly focused window can synthesize
+                # a sustained phantom ESC, which would close the window
+                # immediately. Use 'q' or the window's close button instead.
+                if key == ord('q'):
                     break
                 if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                     break  # window closed via the OS close button

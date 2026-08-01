@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 CSV_PATH = Path("eval_navigation_results.csv")
 FIELDNAMES = [
     "trial", "scenario", "target", "success",
-    "outcome", "duration_s", "detections_count", "notes",
+    "outcome", "duration_s", "detections_count", "session_id", "notes",
 ]
 
 
@@ -126,12 +126,17 @@ def run_trial(nsm, trial_no: int, do_scan: bool, timeout_s: float) -> dict:
         final_state, elapsed = "STOPPED", time.monotonic() - t_start
         aborted = True
 
-    # Grab detections count from the last session log
-    history = nsm.get_history(limit=1)
-    det_count = history[0]["detections_count"] if history else 0
-
     if not aborted:
-        nsm.stop()   # ensure clean state
+        # stop() joins the run thread, which guarantees the session JSON has
+        # been flushed to search_logs/ before get_history() below reads it -
+        # without this, get_history() can race the background thread and
+        # return the *previous* trial's session instead of this one's.
+        nsm.stop()
+
+    # Grab detections count + session id from the last session log
+    history = nsm.get_history(limit=1)
+    det_count  = history[0]["detections_count"] if history else 0
+    session_id = history[0]["session_id"] if history else None
 
     print(f"\n  Final state : {final_state}  ({elapsed:.1f} s)")
     print(f"  Detections  : {det_count}")
@@ -148,6 +153,7 @@ def run_trial(nsm, trial_no: int, do_scan: bool, timeout_s: float) -> dict:
         "outcome":          final_state,
         "duration_s":       round(elapsed, 1),
         "detections_count": det_count,
+        "session_id":       session_id or "",
         "notes":            notes,
     }
 

@@ -10,7 +10,11 @@ delete false positives, draw missed detections, and fix wrong boxes/classes.
 
 Usage
 -----
-    python review_dataset.py --dir dataset
+    python review_dataset.py --dir dataset [--no-flip]
+
+Display is rotated 180° by default to match capture_dataset.py's preview
+(the camera is physically mounted rotated) - this only affects what you see
+on screen, never the underlying box coordinates written to the .txt files.
 
 Controls
 --------
@@ -76,7 +80,7 @@ def point_in_box(x, y, b: Box) -> bool:
 
 
 class Reviewer:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, flip: bool = True):
         self.dir = directory
         self.images = sorted(p for p in directory.glob("*.jpg"))
         if not self.images:
@@ -86,7 +90,24 @@ class Reviewer:
         self.pending: Box | None = None
         self.drag_start = None
         self.dirty = False
+        # The saved images are in the camera's raw (upside-down) orientation -
+        # same convention as capture_dataset.py. All box math below stays in
+        # that raw coordinate space (it's what gets written to the .txt file);
+        # only the display and mouse input are flipped for viewing.
+        self.flip = flip
         self._load_current()
+
+    # ── raw <-> display coordinate conversion (180° rotation) ───────────────────
+
+    def _to_raw(self, x, y):
+        if not self.flip:
+            return x, y
+        return self.w - x, self.h - y
+
+    def _to_display_box(self, x1, y1, x2, y2):
+        if not self.flip:
+            return x1, y1, x2, y2
+        return self.w - x2, self.h - y2, self.w - x1, self.h - y1
 
     # ── image loading ────────────────────────────────────────────────────────
 
@@ -119,6 +140,7 @@ class Reviewer:
     # ── mouse handling ────────────────────────────────────────────────────────
 
     def on_mouse(self, event, x, y, flags, param):
+        x, y = self._to_raw(x, y)  # screen click -> raw storage coordinates
         if event == cv2.EVENT_LBUTTONDOWN:
             self.drag_start = (x, y)
         elif event == cv2.EVENT_LBUTTONUP and self.drag_start:
@@ -138,16 +160,43 @@ class Reviewer:
 
     # ── drawing ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _put_text_outlined(vis, text, pos, scale, color):
+        cv2.putText(vis, text, pos, _FONT, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(vis, text, pos, _FONT, scale, color, 1, cv2.LINE_AA)
+
+    def _wrap_to_width(self, items, max_width, scale):
+        """Greedily pack ' | '-separated items into lines that fit max_width px."""
+        lines, current = [], ""
+        for item in items:
+            candidate = item if not current else f"{current} | {item}"
+            (tw, _), _ = cv2.getTextSize(candidate, _FONT, scale, 1)
+            if tw > max_width and current:
+                lines.append(current)
+                current = item
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
     def render(self):
-        vis = self.img.copy()
+        # Rotate the base frame for display; box overlays are transformed to
+        # match, but their underlying (raw) coordinates are never touched.
+        vis = cv2.rotate(self.img, cv2.ROTATE_180).copy() if self.flip else self.img.copy()
+
         for b in self.boxes:
-            x1, y1, x2, y2 = int(b.x1), int(b.y1), int(b.x2), int(b.y2)
+            x1, y1, x2, y2 = self._to_display_box(b.x1, b.y1, b.x2, b.y2)
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             label = BEVERAGE_LABELS[b.cls] if 0 <= b.cls < len(BEVERAGE_LABELS) else "?"
             cv2.rectangle(vis, (x1, y1), (x2, y2), _BOX_COLOR, 2)
             cv2.putText(vis, label, (x1, max(y1 - 6, 12)), _FONT, 0.5, _BOX_COLOR, 1, cv2.LINE_AA)
 
         if self.pending:
-            x1, y1, x2, y2 = int(self.pending.x1), int(self.pending.y1), int(self.pending.x2), int(self.pending.y2)
+            x1, y1, x2, y2 = self._to_display_box(
+                self.pending.x1, self.pending.y1, self.pending.x2, self.pending.y2
+            )
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             cv2.rectangle(vis, (x1, y1), (x2, y2), _PENDING_COLOR, 2)
 
         hud = [
@@ -156,22 +205,30 @@ class Reviewer:
             "Left-drag=new box  Right-click=delete  0-8=class  S=save+next  N=skip  P=prev  Q=quit",
         ]
         for i, line in enumerate(hud):
-            y = 20 + i * 22
-            cv2.putText(vis, line, (10, y), _FONT, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(vis, line, (10, y), _FONT, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            self._put_text_outlined(vis, line, (10, 20 + i * 22), 0.5, (255, 255, 255))
 
-        legend = " | ".join(f"{i}:{lbl}" for i, lbl in enumerate(BEVERAGE_LABELS))
-        cv2.putText(vis, legend, (10, self.h - 12), _FONT, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(vis, legend, (10, self.h - 12), _FONT, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        # Legend, wrapped to fit the frame width instead of running off the edge.
+        legend_scale = 0.45
+        items = [f"{i}:{lbl}" for i, lbl in enumerate(BEVERAGE_LABELS)]
+        legend_lines = self._wrap_to_width(items, max_width=self.w - 20, scale=legend_scale)
+        base_y = self.h - 12 - 20 * (len(legend_lines) - 1)
+        for i, line in enumerate(legend_lines):
+            self._put_text_outlined(vis, line, (10, base_y + i * 20), legend_scale, (255, 255, 255))
+
         return vis
 
 
 def main():
     parser = argparse.ArgumentParser(description="Manually review/correct a YOLO dataset")
     parser.add_argument("--dir", type=Path, default=Path("dataset"))
+    parser.add_argument("--flip", dest="flip", action="store_true", default=True,
+                        help="Rotate the display 180° (default: on - matches "
+                             "capture_dataset.py's preview; does not affect saved files)")
+    parser.add_argument("--no-flip", dest="flip", action="store_false",
+                        help="Disable the 180° display rotation")
     args = parser.parse_args()
 
-    reviewer = Reviewer(args.dir)
+    reviewer = Reviewer(args.dir, flip=args.flip)
     window = "review_dataset"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window, 900, 700)
@@ -184,7 +241,8 @@ def main():
         cv2.imshow(window, reviewer.render())
         key = cv2.waitKey(30) & 0xFF
 
-        if key in (ord('q'), ord('Q'), 27):
+        # NOTE: ESC (27) deliberately not treated as quit - see capture_dataset.py
+        if key in (ord('q'), ord('Q')):
             if reviewer.dirty:
                 print("Quitting WITHOUT saving unsaved changes on this image "
                       "(press S first if you want to keep them).")

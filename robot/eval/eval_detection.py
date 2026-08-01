@@ -117,7 +117,7 @@ def _compute_ap(recalls: list[float], precisions: list[float]) -> float:
 
 # ── Main evaluation loop ───────────────────────────────────────────────────────
 
-def evaluate(images_dir: Path, conf_thresh: float) -> dict:
+def evaluate(images_dir: Path, conf_thresh: float, exclude_ids: frozenset[int] = frozenset()) -> dict:
     image_paths = sorted(
         p for p in images_dir.iterdir()
         if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")
@@ -157,6 +157,8 @@ def evaluate(images_dir: Path, conf_thresh: float) -> dict:
             for img_path in image_paths:
                 txt_path = img_path.with_suffix(".txt")
                 gt_boxes = _load_gt(txt_path)
+                if exclude_ids:
+                    gt_boxes = [g for g in gt_boxes if g["cls"] not in exclude_ids]
                 if not gt_boxes:
                     log.debug("No annotation for %s — skipping", img_path.name)
                     skipped += 1
@@ -188,6 +190,8 @@ def evaluate(images_dir: Path, conf_thresh: float) -> dict:
                     try:
                         cls_id = BEVERAGE_LABELS.index(det.label)
                     except ValueError:
+                        continue
+                    if cls_id in exclude_ids:
                         continue
                     pred_box = {"x1": det.x1, "y1": det.y1, "x2": det.x2, "y2": det.y2}
                     best_iou, best_i = 0.0, -1
@@ -260,6 +264,7 @@ def evaluate(images_dir: Path, conf_thresh: float) -> dict:
         "latency_p95_ms":  round(float(np.percentile(lat_ms, 95)), 1) if len(lat_ms) else None,
         "conf_thresh":     conf_thresh,
         "iou_thresh":      IOU_THRESHOLD,
+        "excluded_classes": sorted(BEVERAGE_LABELS[i] for i in exclude_ids),
         "per_class":       per_class,
     }
 
@@ -269,6 +274,8 @@ def evaluate(images_dir: Path, conf_thresh: float) -> dict:
 def _print_table(results: dict) -> None:
     W = 68
     print(f"\n{'─'*W}")
+    if results.get("excluded_classes"):
+        print(f"  Excluded from evaluation: {', '.join(results['excluded_classes'])}")
     print(f"  mAP@0.5 = {results['map50']:.4f}  "
           f"({results['n_images']} images, {results['n_skipped']} skipped)")
     if results["latency_mean_ms"] is not None:
@@ -305,11 +312,21 @@ def main() -> None:
                         metavar="F", help=f"Confidence threshold (default {DET_CONF_THRESH})")
     parser.add_argument("--out",    type=Path, default=Path("eval_detection_results.json"),
                         metavar="FILE", help="Output JSON (default eval_detection_results.json)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="LABEL",
+                        help="Class label to exclude entirely from evaluation (both GT and "
+                             "predictions), e.g. --exclude cup-disposable. Repeatable.")
     args = parser.parse_args()
+
+    exclude_ids = set()
+    for label in args.exclude:
+        if label not in BEVERAGE_LABELS:
+            raise SystemExit(f"Unknown --exclude label {label!r}. Valid labels: {BEVERAGE_LABELS}")
+        exclude_ids.add(BEVERAGE_LABELS.index(label))
 
     results = evaluate(
         images_dir  = args.images.expanduser().resolve(),
         conf_thresh = args.conf,
+        exclude_ids = frozenset(exclude_ids),
     )
     _print_table(results)
     args.out.write_text(json.dumps(results, indent=2))

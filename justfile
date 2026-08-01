@@ -5,6 +5,11 @@
 export PYTHONPATH := justfile_directory() + ":" + justfile_directory() + "/robot"
 venv_python := justfile_directory() + "/venv_hailo_rpi_examples/bin/python3"
 
+# OpenCV's Qt5 GUI backend fails to find its native Wayland plugin on this Pi
+# ("could not find wayland") - force it onto the XWayland/X11 compatibility
+# layer instead, which is present and reliable under the default desktop.
+export QT_QPA_PLATFORM := "xcb"
+
 # Zobrazí seznam dostupných příkazů (výchozí příkaz)
 default:
     @just --list
@@ -50,8 +55,13 @@ review DIR="dataset":
     {{venv_python}} robot/eval/review_dataset.py --dir {{DIR}}
 
 # mAP@0.5 vyhodnocení detektoru na ručně zkontrolované sadě (2.5.1)
-eval-detection IMAGES:
-    {{venv_python}} robot/eval/eval_detection.py --images {{IMAGES}}
+# Např.: just eval-detection dataset --exclude cup-disposable
+eval-detection IMAGES *ARGS="":
+    {{venv_python}} robot/eval/eval_detection.py --images {{IMAGES}} {{ARGS}}
+
+# Vyhodnocení bez ohledu na třídu — jen "je tam nějaký beverage container a kde?" (2.5.1)
+eval-detection-agnostic IMAGES *ARGS="":
+    {{venv_python}} robot/eval/eval_detection_agnostic.py --images {{IMAGES}} {{ARGS}}
 
 # Interaktivní navigační zkoušky — vyžaduje fyzicky přítomného robota (2.5.2)
 eval-navigation TRIALS="5" *ARGS="":
