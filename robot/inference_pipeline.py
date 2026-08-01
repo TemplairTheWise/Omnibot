@@ -488,6 +488,13 @@ class InferencePipeline:
                     h, w = frame.shape[:2]
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                     writer = cv2.VideoWriter(path, fourcc, CAMERA_FPS, (w, h))
+                    if not writer.isOpened():
+                        # e.g. a directory-only path, missing codec, or no
+                        # write permission - cv2 fails silently otherwise,
+                        # so make it loud instead of pretending to record.
+                        log.error("VideoWriter failed to open for %r - "
+                                  "recording will NOT be saved", path)
+                        return
                     log.info("VideoWriter opened: %dx%d @ %d fps", w, h, CAMERA_FPS)
 
                 vis = frame.copy()

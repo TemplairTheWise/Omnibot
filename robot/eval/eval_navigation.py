@@ -3,10 +3,12 @@ eval_navigation.py — Step 14: Interactive navigation trial runner.
 
 Run this script with the robot physically present.  For each trial it:
   1. Prompts you for the scenario name and expected target.
-  2. Starts the NavStateMachine (with or without polar scan).
-  3. Waits until the robot reaches FOUND or you abort with Ctrl-C.
-  4. Prompts you to confirm success and note any observations.
-  5. Writes one row to eval_navigation_results.csv.
+  2. Optionally records the run - the video is saved automatically under
+     attempts/ with a generated filename, no path to type.
+  3. Starts the NavStateMachine (with or without polar scan).
+  4. Waits until the robot reaches FOUND or you abort with Ctrl-C.
+  5. Prompts you to confirm success and note any observations.
+  6. Writes one row to eval_navigation_results.csv.
 
 After all trials it prints a summary table.
 
@@ -17,6 +19,7 @@ Usage
 Output
 ------
   eval_navigation_results.csv  (appended, so runs accumulate across sessions)
+  attempts/*.mp4               (only for trials you choose to record)
 
 Requirements
 -----------
@@ -27,6 +30,7 @@ Requirements
 import argparse
 import csv
 import logging
+import re
 import signal
 import sys
 import time
@@ -35,11 +39,21 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-CSV_PATH = Path("eval_navigation_results.csv")
+CSV_PATH     = Path("eval_navigation_results.csv")
+ATTEMPTS_DIR = Path("attempts")
 FIELDNAMES = [
-    "trial", "scenario", "target", "success",
-    "outcome", "duration_s", "detections_count", "session_id", "notes",
+    "trial", "scenario", "target", "success", "outcome",
+    "duration_s", "scan_s", "detections_count", "session_id", "recording", "notes",
 ]
+# duration_s excludes time spent in the polar scan (initial + any re-scans) -
+# see scan_s for how much was excluded. Pulled from the session log's
+# nav_duration_s, not the raw polled elapsed time, so it isn't inflated by
+# scan cost that's unrelated to the actual search/approach being measured.
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    return slug or "trial"
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -48,6 +62,22 @@ def _ensure_csv() -> None:
     if not CSV_PATH.exists():
         with CSV_PATH.open("w", newline="") as f:
             csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
+        return
+
+    # If FIELDNAMES changed since this file was created, appending now would
+    # silently misalign every column from the change onward (happened once
+    # already when scan_s was added) - refuse instead of writing bad rows.
+    with CSV_PATH.open(newline="") as f:
+        existing_header = next(csv.reader(f), [])
+    if existing_header != FIELDNAMES:
+        raise SystemExit(
+            f"{CSV_PATH} has an outdated header - the column layout changed "
+            f"since this file was created, so appending would silently "
+            f"misalign every row.\n"
+            f"  File header : {existing_header}\n"
+            f"  Expected    : {FIELDNAMES}\n"
+            f"Migrate or rename the existing file before running more trials."
+        )
 
 
 def _append_row(row: dict) -> None:
@@ -101,7 +131,14 @@ def run_trial(nsm, trial_no: int, do_scan: bool, timeout_s: float) -> dict:
 
     scenario = input("  Scenario description (e.g. 'open table, 1 bottle'): ").strip()
     target   = input("  Target label (blank = any beverage): ").strip() or None
-    record   = input("  Record video path (blank = off): ").strip() or None
+
+    record = None
+    if input("  Record this trial? [y/N]: ").strip().lower() in ("y", "yes"):
+        ATTEMPTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts    = datetime.now().strftime("%H%M%S")
+        fname = f"trial{trial_no:03d}_{_slugify(scenario)}_{ts}.mp4"
+        record = str(ATTEMPTS_DIR / fname)
+        print(f"  Recording → {record}")
 
     print(f"\n  Starting — scan={'yes' if do_scan else 'no'}  timeout={timeout_s}s")
     print("  Press Ctrl-C to abort the trial early.\n")
@@ -133,12 +170,23 @@ def run_trial(nsm, trial_no: int, do_scan: bool, timeout_s: float) -> dict:
         # return the *previous* trial's session instead of this one's.
         nsm.stop()
 
-    # Grab detections count + session id from the last session log
-    history = nsm.get_history(limit=1)
-    det_count  = history[0]["detections_count"] if history else 0
-    session_id = history[0]["session_id"] if history else None
+    # Grab detections count + session id + scan-excluded duration from the
+    # last session log
+    history        = nsm.get_history(limit=1)
+    det_count      = history[0]["detections_count"] if history else 0
+    session_id     = history[0]["session_id"] if history else None
+    scan_s         = history[0].get("scan_s") if history else None
+    nav_duration_s = history[0].get("nav_duration_s") if history else None
 
-    print(f"\n  Final state : {final_state}  ({elapsed:.1f} s)")
+    # Prefer the session log's navigation-only duration (excludes polar-scan
+    # time); fall back to the raw polled elapsed time if the log is missing.
+    duration_reported = nav_duration_s if nav_duration_s is not None else round(elapsed, 1)
+
+    if scan_s is not None:
+        print(f"\n  Final state : {final_state}  "
+              f"(total {elapsed:.1f}s, nav {duration_reported:.1f}s, scan {scan_s:.1f}s)")
+    else:
+        print(f"\n  Final state : {final_state}  ({elapsed:.1f} s)")
     print(f"  Detections  : {det_count}")
 
     success_raw = input("  Mark as SUCCESS? [y/N]: ").strip().lower()
@@ -151,9 +199,11 @@ def run_trial(nsm, trial_no: int, do_scan: bool, timeout_s: float) -> dict:
         "target":           target or "any",
         "success":          "1" if success else "0",
         "outcome":          final_state,
-        "duration_s":       round(elapsed, 1),
+        "duration_s":       duration_reported,
+        "scan_s":           scan_s if scan_s is not None else "",
         "detections_count": det_count,
         "session_id":       session_id or "",
+        "recording":        record or "",
         "notes":            notes,
     }
 
@@ -202,11 +252,23 @@ def main() -> None:
     parser.add_argument("--scan",    action="store_true",
                         help="Enable polar scan before each search")
     parser.add_argument("--timeout", type=float, default=120.0,
-                        help="Per-trial timeout in seconds (default 120)")
+                        help="Per-trial navigation timeout in seconds - if "
+                             "--scan is set, the initial polar scan's "
+                             "estimated duration is added on top of this "
+                             "automatically (default 120)")
     args = parser.parse_args()
 
     # Hardware init
     print("\nInitialising hardware …")
+    from polar_scan import N_STEPS, DEG_PER_SEC, SETTLE_S
+
+    effective_timeout = args.timeout
+    if args.scan:
+        step_angle_deg = 360.0 / N_STEPS
+        scan_s = N_STEPS * (step_angle_deg / DEG_PER_SEC + SETTLE_S)
+        effective_timeout += scan_s
+        print(f"--scan enabled — adding ~{scan_s:.0f}s estimated scan time "
+              f"to the {args.timeout:.0f}s timeout → {effective_timeout:.0f}s per trial")
     from omnibot import OmniBot
     from inference_pipeline import InferencePipeline
     from sonar_guard import SonarGuard
@@ -245,7 +307,7 @@ def main() -> None:
 
     for i in range(args.trials):
         trial_no = trial_offset + i + 1
-        row = run_trial(nsm, trial_no, do_scan=args.scan, timeout_s=args.timeout)
+        row = run_trial(nsm, trial_no, do_scan=args.scan, timeout_s=effective_timeout)
         if not row:
             continue
         _append_row(row)

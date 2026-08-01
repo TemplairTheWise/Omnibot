@@ -46,7 +46,7 @@ detect-video:
 
 # ── Sběr dat a vyhodnocení (kapitola 2.5) ────────────────────────────────────
 
-# Interaktivní sběr testovací sady (SPACE = uložit, Q/ESC = konec)
+# Interaktivní sběr testovací sady (SPACE = uložit, Q = konec)
 capture OUT="dataset" *ARGS="":
     {{venv_python}} robot/eval/capture_dataset.py --out {{OUT}} {{ARGS}}
 
@@ -66,6 +66,10 @@ eval-detection-agnostic IMAGES *ARGS="":
 # Interaktivní navigační zkoušky — vyžaduje fyzicky přítomného robota (2.5.2)
 eval-navigation TRIALS="5" *ARGS="":
     {{venv_python}} robot/eval/eval_navigation.py --trials {{TRIALS}} {{ARGS}}
+
+# Efektivita mapování prostoru ze záznamů relací — bez hardwaru (2.5.3)
+eval-mapping *ARGS="":
+    {{venv_python}} robot/eval/eval_mapping.py {{ARGS}}
 
 # ── Testování (2.5.3) ────────────────────────────────────────────────────────
 

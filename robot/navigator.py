@@ -37,6 +37,12 @@ SLOW_ZONE_CAP     = 45    # % — max speed while in sonar SLOW zone
 ROTATION_TRIGGER  = 20.0  # ° — rotate in place above this steering angle
 LOOP_HZ           = 10    # target update rate for the standalone test loop
 
+# Sonar STOP zone: rather than freezing indefinitely, attempt to rotate away
+# for this long before giving up to a hard stop. There's no odometry, so
+# this is a time-based stand-in for "about 90°" - calibrate it to your robot
+# the same way PolarScan's DEG_PER_SEC was calibrated.
+STOP_ESCAPE_S = 2.0
+
 
 class Navigator:
     """
@@ -61,6 +67,7 @@ class Navigator:
         self.base_speed       = BASE_SPEED
         self.min_speed        = MIN_SPEED
         self.rotation_trigger = ROTATION_TRIGGER
+        self._stop_escape_start_t: float | None = None
 
     # ── Core step ─────────────────────────────────────────────────────────────
 
@@ -84,16 +91,16 @@ class Navigator:
         Returns
         -------
         VFHResult  — the chosen steering direction and histogram (for logging/debug)
-        None       — all sectors blocked; the robot is now rotating left to rescan
+        None       — all sectors blocked, or sonar STOP zone; the robot is
+                     rotating left (to rescan, or to try to escape) rather
+                     than sitting still
         """
         # ── Sonar safety check (hard-stop / slow-down) ──────────────────────
         if check_sonar and self.sonar is not None:
             sonar_zone = self.sonar.zone
             if sonar_zone == ZONE_STOP:
-                self.bot.stop()
-                log.debug("Sonar STOP (%.1f cm) — halting",
-                          self.sonar.distance_cm or 0)
-                return None
+                return self._handle_stop_zone()
+            self._stop_escape_start_t = None  # clear of STOP - reset for next time
         else:
             sonar_zone = None if not check_sonar else (
                 self.sonar.zone if self.sonar else None
@@ -232,6 +239,27 @@ class Navigator:
             log.info("Navigator stopped — bot halted.")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _handle_stop_zone(self) -> None:
+        """
+        Sonar STOP zone: instead of freezing until the obstacle goes away on
+        its own, try rotating left for up to STOP_ESCAPE_S seconds to turn
+        away from it. Gives up to a hard stop once that window elapses -
+        the caller's own recovery logic (e.g. NavStateMachine's re-scan)
+        takes over from there.
+        """
+        now = time.monotonic()
+        if self._stop_escape_start_t is None:
+            self._stop_escape_start_t = now
+            log.debug("Sonar STOP (%.1f cm) — attempting to rotate left to escape",
+                      self.sonar.distance_cm or 0)
+
+        if now - self._stop_escape_start_t < STOP_ESCAPE_S:
+            self.bot.rotate("left", ROTATION_SPEED)
+        else:
+            self.bot.stop()
+            log.debug("Sonar STOP — escape rotation exhausted, halting")
+        return None
 
     def _speed_from_clearance(self, result: VFHResult) -> int:
         """

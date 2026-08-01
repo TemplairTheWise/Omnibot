@@ -3,7 +3,10 @@
 import numpy as np
 import pytest
 
-from navigator import Navigator, SLOW_ZONE_CAP, ROTATION_TRIGGER, ROTATION_SPEED, BASE_SPEED, MIN_SPEED
+from navigator import (
+    Navigator, SLOW_ZONE_CAP, ROTATION_TRIGGER, ROTATION_SPEED,
+    BASE_SPEED, MIN_SPEED, STOP_ESCAPE_S,
+)
 from sonar_guard import ZONE_CLEAR, ZONE_SLOW, ZONE_STOP
 
 
@@ -35,12 +38,50 @@ def _blocked_depth():
     return np.full((240, 320), 0.9, dtype=np.float32)
 
 
-def test_sonar_stop_zone_halts_without_driving():
+def test_sonar_stop_zone_rotates_to_escape_instead_of_freezing():
     bot = FakeBot()
     nav = Navigator(bot, sonar=FakeSonar(zone=ZONE_STOP))
     result = nav.step(_open_depth(), goal_bearing_deg=0.0)
     assert result is None
+    assert bot.calls == [("rotate", "left", ROTATION_SPEED)]
+
+
+def test_sonar_stop_zone_keeps_rotating_within_escape_window():
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar(zone=ZONE_STOP))
+    nav.step(_open_depth(), goal_bearing_deg=0.0)
+    bot.calls.clear()
+    nav.step(_open_depth(), goal_bearing_deg=0.0)  # still within the window
+    assert bot.calls == [("rotate", "left", ROTATION_SPEED)]
+
+
+def test_sonar_stop_zone_gives_up_to_hard_stop_after_escape_window():
+    bot = FakeBot()
+    nav = Navigator(bot, sonar=FakeSonar(zone=ZONE_STOP))
+    nav.step(_open_depth(), goal_bearing_deg=0.0)  # starts the escape attempt
+    nav._stop_escape_start_t -= (STOP_ESCAPE_S + 1)  # fast-forward past the window
+    bot.calls.clear()
+    result = nav.step(_open_depth(), goal_bearing_deg=0.0)
+    assert result is None
     assert bot.calls == [("stop",)]
+
+
+def test_sonar_stop_escape_resets_once_zone_clears():
+    bot = FakeBot()
+    sonar = FakeSonar(zone=ZONE_STOP)
+    nav = Navigator(bot, sonar=sonar)
+    nav.step(_open_depth(), goal_bearing_deg=0.0)
+    assert nav._stop_escape_start_t is not None
+
+    sonar.zone = ZONE_CLEAR
+    nav.step(_open_depth(), goal_bearing_deg=0.0)
+    assert nav._stop_escape_start_t is None
+
+    # A later, separate STOP event must start a fresh escape attempt.
+    sonar.zone = ZONE_STOP
+    bot.calls.clear()
+    nav.step(_open_depth(), goal_bearing_deg=0.0)
+    assert bot.calls == [("rotate", "left", ROTATION_SPEED)]
 
 
 def test_check_sonar_false_ignores_stop_zone():
